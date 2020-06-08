@@ -1,0 +1,15 @@
+[package]
+name = "ergo"
+version = "0.1.0"
+authors = ["Heinz N. Gies <heinz@licenser.net>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tide = "*"
+ergolib = {path = "ergolib"}
+serde = "*"
+serde_yaml = "*"
+async-std = {version = "1.6", features = ["attributes"]}
+http-types = "*"
