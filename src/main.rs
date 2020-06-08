@@ -1,5 +1,4 @@
 use async_std;
-use core::convert::TryInto;
 use ergolib;
 use tide::{Body, Request, Response};
 
@@ -8,109 +7,106 @@ struct Counter {
     count: usize,
 }
 
-enum Error {
-    Yaml(serde_yaml::Error),
-    DivisionByZero,
-    DontLikeIt,
-}
+struct AppError(ergolib::Error);
 
-impl TryInto<http_types::StatusCode> for &Error {
-    type Error = <http_types::StatusCode as std::convert::TryFrom<u16>>::Error;
-    fn try_into(self) -> std::result::Result<http_types::StatusCode, Self::Error> {
-        match self {
-            Error::Yaml(_) | Error::DivisionByZero => 422.try_into(),
-            Error::DontLikeIt => 500.try_into(),
+impl std::error::Error for AppError {}
+
+impl std::fmt::Debug for AppError {
+    // we have to manually define Debug becuase the external library
+    // didn't derive it
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            ergolib::Error::DontLikeIt => write!(f, "Don't like it"),
+            ergolib::Error::DivisionByZero => write!(f, "Division by zero"),
         }
     }
 }
 
-impl Into<Body> for Error {
-    fn into(self) -> Body {
-        match self {
-            Error::Yaml(y) => format!("YAML error: {}", y).into(),
-            Error::DivisionByZero => "count can't be zero".into(),
-            Error::DontLikeIt => "The server doesn't like this number".into(),
-        }
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
-impl From<Error> for Response {
-    fn from(e: Error) -> Self {
-        let mut r = Response::new(&e);
-        r.set_body(e);
-        r
-    }
-}
-
-impl From<serde_yaml::Error> for Error {
-    fn from(e: serde_yaml::Error) -> Self {
-        Error::Yaml(e)
-    }
-}
-
-impl From<ergolib::Error> for Error {
+impl From<ergolib::Error> for AppError {
     fn from(e: ergolib::Error) -> Self {
-        match e {
-            ergolib::Error::DivisionByZero => Error::DivisionByZero,
-            ergolib::Error::DontLikeIt => Error::DontLikeIt,
+        Self(e)
+    }
+}
+
+// this could just as easily be inlined in the middleware, or a normal
+// method on AppError
+impl Into<Response> for &AppError {
+    fn into(self) -> Response {
+        match self.0 {
+            ergolib::Error::DontLikeIt => {
+                let mut res = Response::new(500);
+                res.set_body("The server doesn't like this number");
+                res
+            }
+
+            ergolib::Error::DivisionByZero => {
+                let mut res = Response::new(422);
+                res.set_body("count can't be zero");
+                res
+            }
         }
     }
 }
 
-type Result = std::result::Result<Counter, Error>;
+//only renamed for clarity
+type AppResult = std::result::Result<Counter, AppError>;
 
-fn handle42(mut counter: Counter) -> Result {
+//unchanged
+fn handle42(mut counter: Counter) -> AppResult {
     counter.count -= 1;
     counter.count = ergolib::nth42(counter.count)?;
     Ok(counter)
 }
 
-fn handle1337(mut counter: Counter) -> Result {
+//unchanged
+fn handle1337(mut counter: Counter) -> AppResult {
     counter.count -= 1;
     counter.count = ergolib::nth1337(counter.count)?;
     Ok(counter)
 }
 
-fn from_yaml(body: &str) -> std::result::Result<Counter, Error> {
-    Ok(serde_yaml::from_str(body)?)
-}
-
 #[async_std::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn main() -> tide::Result<()> {
     let mut app = tide::new();
-    app.at("/42")
-        .get(|mut req: Request<()>| async move {
-            let body = req.body_string().await?;
-            // This isn't converted into a proper error despite being
-            // implemented for `Error` since we can't return a custom error type
-            let mut counter: Counter = serde_yaml::from_str(&body)?;
-            println!("[42] count is {}", counter.count);
 
-            match handle42(counter) {
-                Ok(c) => counter = c,
-                Err(e) => return Ok(e.into()),
-            }
-            let mut res = Response::new(200);
-            res.set_body(Body::from_json(&counter)?);
+    app.middleware(tide::After(|res: tide::Response| async move {
+        if let Some(e) = res.downcast_error::<AppError>() {
+            Ok(e.into())
+        } else if let Some(e) = res.downcast_error::<serde_yaml::Error>() {
+            let mut res = Response::new(422);
+            res.set_body(format!("YAML error: {}", e));
             Ok(res)
-        })
-        .at("/1337")
-        .get(|mut req: Request<()>| async move {
-            let body = req.body_string().await?;
-            // This is a "workaround"
-            let mut counter: Counter = match from_yaml(&body) {
-                Ok(c) => c,
-                Err(e) => return Ok(e.into()),
-            };
-            println!("[1337] count is {}", counter.count);
-            match handle1337(counter) {
-                Ok(c) => counter = c,
-                Err(e) => return Ok(e.into()),
-            }
-            let mut res = Response::new(200);
-            res.set_body(Body::from_json(&counter)?);
+        } else {
             Ok(res)
-        });
+        }
+    }));
+
+    app.at("/42").post(|mut req: Request<()>| async move {
+        let body = req.body_string().await?;
+        let mut counter: Counter = serde_yaml::from_str(&body)?;
+        println!("[42] count is {}", counter.count);
+        counter = handle42(counter)?;
+        let mut res = Response::new(200);
+        res.set_body(Body::from_json(&counter)?);
+        Ok(res)
+    });
+
+    app.at("/1337").post(|mut req: Request<()>| async move {
+        let body = req.body_string().await?;
+        let mut counter: Counter = serde_yaml::from_str(&body)?;
+        println!("[1337] count is {}", counter.count);
+        counter = handle1337(counter)?;
+        let mut res = Response::new(200);
+        res.set_body(Body::from_json(&counter)?);
+        Ok(res)
+    });
+
     app.listen("127.0.0.1:8080").await?;
     Ok(())
 }
