@@ -7,8 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tide = "*"
 ergolib = {path = "ergolib"}
+tide = { git = "https://github.com/Fishrock123/tide", branch = "new-http-types-errors" }
 serde = "*"
 serde_yaml = "*"
 async-std = {version = "1.6", features = ["attributes"]}
